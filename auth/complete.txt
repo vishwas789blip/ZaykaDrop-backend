@@ -1,0 +1,315 @@
+//config/db.ts
+import mongoose from "mongoose";
+
+const connectDB = async() => {
+    try{
+        await mongoose.connect(process.env.MONGO_URI as string,{
+            dbName: "ZaykaDrop",
+        });
+
+        console.log("connected to mongoose")
+    }catch (error){
+        console.log(error);
+    }
+};
+export default connectDB 
+
+// config/googleConfig
+
+import { google } from "googleapis";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+
+export const oauth2client = new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    "postmessage" 
+);
+
+// controller/auth.ts
+
+import { Request, Response } from "express";
+import User from "../models/user.js";
+import axios from "axios";
+import jwt from "jsonwebtoken";
+import tryCatch from "../middleware/tryCatch.js";
+import { AuthenticatedRequest } from "../middleware/isAuth.js";
+import { oauth2client } from "../config/googleConfig.js";
+
+const allowedRoles = ["customer", "rider", "seller"] as const;
+type Role = typeof allowedRoles[number];
+
+export const LoginUser = tryCatch(
+  async (req: Request, res: Response) => {
+    const { code } = req.body;
+
+    if (!code) {
+      return res.status(400).json({
+        message: "Authorization code is required",
+      });
+    }
+
+    const googleRes = await oauth2client.getToken(code);
+    oauth2client.setCredentials(googleRes.tokens);
+
+    const userRes = await axios.get(
+      "https://www.googleapis.com/oauth2/v2/userinfo",
+      {
+        headers: {
+          Authorization: `Bearer ${googleRes.tokens.access_token}`,
+        },
+      }
+    );
+
+    const { email, name, picture } = userRes.data;
+
+    let user = await User.findOne({ email });
+
+    if (!user) {
+      user = await User.create({ email, name, image: picture });
+    }
+
+    const token = jwt.sign(
+      { user: { _id: user._id, email: user.email, role: user.role }},
+      process.env.JWT_SECRET as string,
+      { expiresIn: "7d" }
+    );
+
+    res.status(200).json({
+      message: "Login successful",
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        image: user.image,
+        role: user.role,
+      },
+    });
+  }  
+);   
+
+export const addUserRole = tryCatch(async (req: AuthenticatedRequest, res) => {
+  if (!req.user?._id) {
+    return res.status(401).json({ message: "Unauthorized" }); // ✅ typo fix
+  }
+
+  const { role } = req.body as { role: Role };
+
+  if (!allowedRoles.includes(role)) {
+    return res.status(400).json({ message: "Invalid role" });
+  }
+
+  const user = await User.findByIdAndUpdate(
+    req.user._id,
+    { role },
+    { new: true }
+  );
+
+  if (!user) {  
+    return res.status(404).json({ message: "User not found" });
+  }
+
+  const token = jwt.sign(
+    {user: { _id: user._id, email: user.email, role: user.role }},
+    process.env.JWT_SECRET as string,
+    { expiresIn: "7d" }
+  );
+
+  res.json({ user, token });
+});
+
+export const myProfile = tryCatch(async (req: AuthenticatedRequest, res) => {
+  const user = req.user;
+  res.json(user);
+});
+
+//middleware/isAuth
+
+import { Request, Response, NextFunction } from "express";
+import jwt, { JwtPayload } from "jsonwebtoken";
+import {IUser} from "../models/user.js"
+
+
+export interface AuthenticatedRequest extends Request {
+  user?: IUser | null;
+}
+
+if (!process.env.JWT_SECRET) {
+  throw new Error("JWT_SECRET is missing in .env file");
+}
+
+export const isAuth = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      res.status(401).json({ message: "No token provided" });
+      return;
+    }
+
+    const token = authHeader.split(" ")[1];
+    if (!token ) {
+      res.status(401).json({ message: "No token provided" });
+      return;
+    }
+
+    const decodedValue = jwt.verify(
+      token,
+      process.env.JWT_SECRET as string
+    ) as JwtPayload;
+
+    if (!decodedValue || !decodedValue.user) {
+      res.status(401).json({ message: "Invalid token" });
+      return;
+    }
+
+    req.user = decodedValue.user;
+    next();
+  } catch (error) {
+    console.error("Auth error:", error);
+    res.status(401).json({ message: "Unauthorized, invalid token" });
+  }
+};
+
+//middleware/tryCatch
+
+import { Request, Response, RequestHandler ,NextFunction } from "express";
+
+
+const tryCatch = (handler : RequestHandler):RequestHandler => {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try{
+      await handler (req , res , next);
+
+    }catch (err: any){
+      res.status(500).json({
+        message: err.message,
+      });
+    }
+  };
+};
+
+export default tryCatch;
+
+//models/user.ts
+
+import mongoose, { Schema, Document } from 'mongoose';
+
+export interface IUser extends Document {
+  name: string;
+  email?: string;
+  image: string;
+  role: string;
+}
+
+const UserSchema: Schema = new Schema<IUser>(
+  {
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    email: {
+      type: String,              
+      required: true,
+      unique: true,
+    },
+    image: {
+      type: String,
+      required: true,
+    },
+    role: {
+      type: String,
+      default: null,
+    },
+},
+  {
+    timestamps: true,
+  }
+);
+
+
+export default mongoose.model<IUser>("User", UserSchema);
+
+//routes/auth.ts 
+
+import Express  from "express";
+import {LoginUser, addUserRole, myProfile } from "../controller/auth.js";
+import {isAuth} from "../middleware/isAuth.js";
+
+const router = Express.Router();
+
+router.post("/login", LoginUser);
+router.put("/add/role", isAuth, addUserRole);
+router.get("/me", isAuth, myProfile);
+
+export default router;
+
+//index.ts
+
+import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import connectDB from "./config/db.js";
+import authRoute from "./routes/auth.js";
+
+dotenv.config();
+
+const app = express();
+app.use(cors());
+
+app.use(express.json());
+
+app.use("/api/auth", authRoute);
+
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, () => {
+  console.log(`auth service is running on port ${PORT}`);
+  connectDB();
+});
+
+//package.json 
+
+{
+  "name": "auth",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "concurrently \"tsc -w\" \"nodemon dist/index.js\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.18.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "googleapis": "^173.0.0",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.7.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.9.3",
+    "concurrently": "^10.0.3",
+    "nodemon": "^3.1.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}
