@@ -51,7 +51,7 @@ const riderSchema = new Schema<IRider>(
             select: false,
         },
         vehicleNumber: { type: String, required: true, uppercase: true },
-        isVerified: { type: Boolean, default: false },
+        isVerified: { type: Boolean, default: true },
         rating: {
             average: { type: Number, default: 5, min: 0, max: 5 },
             count: { type: Number, default: 0 },

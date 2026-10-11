@@ -105,7 +105,7 @@ export const createOrder = tryCatch(async (req: AuthenticatedRequest, res) => {
   const platformFee = 7;
   const totalAmount = subtotal + deliveryFee + platformFee;
 
-  const riderAmount = Math.ceil(distance) * 17;
+  const riderAmount = Math.max(45, Math.ceil(Number(distance) || 3) * 18);
 
   const expiredAt =
     paymentMethod !== "COD"
@@ -331,7 +331,7 @@ export const updateOrderStatus = tryCatch(
             pickupAddress: order.pickupAddress?.formattedAddress || restaurant.autoLocation.formattedAddress,
             dropAddress: order.deliveryAddress?.formattedAddress,
             distance: order.distance,
-            riderAmount: order.riderAmount,
+            riderAmount: order.riderAmount || Math.max(45, Math.ceil(Number(order.distance) || 3) * 18),
           }
         );
 
@@ -409,15 +409,23 @@ export const assignRiderToOrder = tryCatch(async (req , res) => {
 
   // Notify customer in real-time — non-blocking
   try {
+    const customerPayload = {
+      orderId: orderUpdate._id.toString(),
+      status: "rider_assigned",
+      riderId: orderUpdate.riderId,
+      riderName: orderUpdate.riderName,
+      riderPhone: orderUpdate.riderPhone,
+      riderLocation: orderUpdate.riderLocation,
+      order: orderUpdate,
+    };
+
+    // Emit to customer's personal room
     await axios.post(
       `${process.env.REALTIME_SERVICE}/api/v1/internal/emit`,
       {
         event: "order_status_updated",
         room: `user:${orderUpdate.userId}`,
-        payload: {
-          orderId: orderUpdate._id.toString(),
-          status: "rider_assigned",
-        },
+        payload: customerPayload,
       },
       {
         headers: {
@@ -426,26 +434,62 @@ export const assignRiderToOrder = tryCatch(async (req , res) => {
       }
     );
 
-    // Also notify restaurant room
+    // Emit to order-specific rooms
     await axios.post(
       `${process.env.REALTIME_SERVICE}/api/v1/internal/emit`,
       {
         event: "order_status_updated",
-        room: `restaurant:${orderUpdate.restaurantId}`,
-        payload: {
-          orderId: orderUpdate._id.toString(),
-          status: "rider_assigned",
-          riderId: orderUpdate.riderId,
-          riderName: orderUpdate.riderName,
-          riderPhone: orderUpdate.riderPhone,
-        },
+        room: `order_${orderUpdate._id}`,
+        payload: customerPayload,
       },
       {
         headers: {
           "x-internal-key": process.env.INTERNAL_SERVICE_KEY,
         },
       }
-    );
+    ).catch(() => {});
+
+    const restaurantPayload = {
+      orderId: orderUpdate._id.toString(),
+      status: "rider_assigned",
+      riderId: orderUpdate.riderId,
+      riderName: orderUpdate.riderName,
+      riderPhone: orderUpdate.riderPhone,
+      order: orderUpdate,
+    };
+
+    // Notify restaurant room
+    await axios.post(
+      `${process.env.REALTIME_SERVICE}/api/v1/internal/emit`,
+      {
+        event: "order_status_updated",
+        room: `restaurant:${orderUpdate.restaurantId}`,
+        payload: restaurantPayload,
+      },
+      {
+        headers: {
+          "x-internal-key": process.env.INTERNAL_SERVICE_KEY,
+        },
+      }
+    ).catch(() => {});
+
+    // Also notify restaurant owner's personal user room
+    const restaurantDoc = await Restaurant.findById(orderUpdate.restaurantId);
+    if (restaurantDoc?.ownerId) {
+      await axios.post(
+        `${process.env.REALTIME_SERVICE}/api/v1/internal/emit`,
+        {
+          event: "order_status_updated",
+          room: `user:${restaurantDoc.ownerId.toString()}`,
+          payload: restaurantPayload,
+        },
+        {
+          headers: {
+            "x-internal-key": process.env.INTERNAL_SERVICE_KEY,
+          },
+        }
+      ).catch(() => {});
+    }
   } catch (error) {
     console.error("Failed to emit rider_assigned realtime event:", error);
   }
@@ -470,9 +514,17 @@ export const getCurrentOrdersForRider = tryCatch(async (req, res) => {
     });
   }
 
-  const orders = await Order.find({
+  const rawOrders = await Order.find({
     riderId: riderId.toString(),
-    status: { $ne: "delivered" },
+    status: { $in: ["rider_assigned", "picked_up"] },
+  }).sort({ updatedAt: -1 });
+
+  const orders = rawOrders.map((o) => {
+    const doc = o.toObject();
+    if (!doc.riderAmount || doc.riderAmount <= 0) {
+      doc.riderAmount = Math.ceil(doc.distance || 3) * 17;
+    }
+    return doc;
   });
 
   return res.status(200).json({
@@ -493,10 +545,18 @@ export const getRiderOrderHistory = tryCatch(async (req, res) => {
     });
   }
 
-  const orders = await Order.find({
+  const rawOrders = await Order.find({
     riderId: riderId.toString(),
     status: "delivered",
   }).sort({ updatedAt: -1 });
+
+  const orders = rawOrders.map((o) => {
+    const doc = o.toObject();
+    if (!doc.riderAmount || doc.riderAmount <= 0) {
+      doc.riderAmount = Math.ceil(doc.distance || 3) * 17;
+    }
+    return doc;
+  });
 
   return res.status(200).json({
     orders,

@@ -5,7 +5,7 @@ export interface IOrder extends Document {
   restaurantId: string;
   restaurantName: string;
   riderId?: string | null;
-  riderPhone: number | null;
+  riderPhone: string | number | null;
   riderName: string | null;
   distance: number;
   riderAmount: number;
@@ -80,7 +80,7 @@ const OrderSchema = new mongoose.Schema({
     default: null
   },
   riderPhone: {
-    type: Number,
+    type: mongoose.Schema.Types.Mixed,
     default: null
   },
   riderName: {
@@ -94,6 +94,10 @@ const OrderSchema = new mongoose.Schema({
   distance: {
     type: Number,
     required: true
+  },
+  riderAmount: {
+    type: Number,
+    default: 0
   },
   items: [
     {
