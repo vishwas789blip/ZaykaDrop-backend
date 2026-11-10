@@ -1,0 +1,2 @@
+# ZaykaDrop-backend
+all services
