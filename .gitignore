@@ -1,1 +1,15 @@
-realtime/.env 
+node_modules/
+*/node_modules/
+
+# Environment files
+.env
+*/.env
+*.env
+!*.env.example
+!*/*.env.example
+
+# Build artifacts
+dist/
+*/dist/
+
+*.log

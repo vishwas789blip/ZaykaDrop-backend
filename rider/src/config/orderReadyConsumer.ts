@@ -1,11 +1,11 @@
 import axios from "axios";
 import { getChannel } from "./rabbitmq";
-import Rider from "../models/rider";
+import { findNearbyAvailableRiders } from "../models/rider";
 
 export const startOrderReadyConsumer = async () => {
   const channel = getChannel();
 
-  const queueName = process.env.ORDER_READY_QUEUE as string;
+  const queueName = process.env.ORDER_READY_QUEUE || "order_ready_queue";
 
   console.log("Starting to consume from", queueName);
 
@@ -39,16 +39,19 @@ export const startOrderReadyConsumer = async () => {
         riderAmount,
       } = event.data;
 
-      const riders = await Rider.find({
-        isAvailable: true,
-        isVerified: true,
-        location: {
-          $near: {
-            $geometry: location,
-            $maxDistance: 5000,
-          },
-        },
-      });
+      const coordinates = location?.coordinates;
+      if (!Array.isArray(coordinates) || coordinates.length < 2) {
+        console.warn(`⚠️ Missing location coordinates for order ${orderId}`);
+        channel.ack(msg);
+        return;
+      }
+
+      const [longitude, latitude] = coordinates;
+      const riders = await findNearbyAvailableRiders(
+        Number(latitude),
+        Number(longitude),
+        5000
+      );
 
       console.log(`Found ${riders.length} nearby riders for order ${orderId}`);
 
@@ -87,12 +90,8 @@ export const startOrderReadyConsumer = async () => {
 
       console.log(`✅ Notifications sent for order ${orderId}`);
       channel.ack(msg);
-
     } catch (error) {
-      console.error(
-        "❌ Error while processing RabbitMQ message:",
-        error
-      );
+      console.error("❌ Error while processing RabbitMQ message:", error);
 
       // Discard or dead-letter rather than infinite retry loop
       channel.nack(msg, false, false);

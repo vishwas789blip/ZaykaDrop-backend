@@ -7,9 +7,7 @@ export const connectRabbitMQ = async () => {
     throw new Error("RABBITMQ_URL is not defined");
   }
 
-  if (!process.env.ORDER_READY_QUEUE) {
-    throw new Error("ORDER_READY_QUEUE is not defined");
-  }
+  const queue = process.env.ORDER_READY_QUEUE || "order_ready_queue";
 
   const connection = await amqp.connect(
     process.env.RABBITMQ_URL
@@ -18,7 +16,7 @@ export const connectRabbitMQ = async () => {
   channel = await connection.createChannel();
 
   await channel.assertQueue(
-    process.env.ORDER_READY_QUEUE,
+    queue,
     {
       durable: true,
     }
@@ -26,7 +24,7 @@ export const connectRabbitMQ = async () => {
 
   console.log(
     "RabbitMQ queue ready:",
-    process.env.ORDER_READY_QUEUE
+    queue
   );
 };
 
