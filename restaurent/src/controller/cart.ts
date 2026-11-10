@@ -1,8 +1,14 @@
-import mongoose from "mongoose";
+import { isValidUUID } from "../config/db.js";
 import { AuthenticatedRequest } from "../middleware/isAuth.js";
 import { tryCatch } from "../middleware/tryCatch.js";
-import Cart from "../models/cart.js";
-import MenuItems from "../models/MenuItems.js";
+import {
+  clearCartByUser,
+  decrementOrDeleteCartItem,
+  findDifferentRestaurantInCart,
+  findPopulatedCartByUser,
+  upsertIncrementCartItem,
+} from "../models/cart.js";
+import { findAvailableMenuItem } from "../models/MenuItems.js";
 
 export const addToCart = tryCatch(async (req: AuthenticatedRequest, res) => {
   if (!req.user) {
@@ -13,45 +19,38 @@ export const addToCart = tryCatch(async (req: AuthenticatedRequest, res) => {
   const { restaurantId, itemId } = req.body;
 
   if (
-    !mongoose.Types.ObjectId.isValid(restaurantId) ||
-    !mongoose.Types.ObjectId.isValid(itemId)
+    typeof restaurantId !== "string" ||
+    typeof itemId !== "string" ||
+    !isValidUUID(restaurantId) ||
+    !isValidUUID(itemId)
   ) {
     return res.status(400).json({
       message: "Invalid restaurant and item id",
     });
   }
 
-  const cartFromDifferentRestaurant = await Cart.findOne({
+  const cartFromDifferentRestaurant = await findDifferentRestaurantInCart(
     userId,
-    restaurantId: { $ne: restaurantId },  // $ne = not equal
-  });
+    restaurantId
+  );
 
   if (cartFromDifferentRestaurant) {
     return res.status(400).json({
-      message: "You can order from only one restaurant at a time. Please clear cart first to add items from this restaurant.",
+      message:
+        "You can order from only one restaurant at a time. Please clear cart first to add items from this restaurant.",
     });
   }
 
-  const menuItem = await MenuItems.findOne({
-    _id: itemId,
-    restaurantId,
-    isAvailable: true,
-  });
+  const menuItem = await findAvailableMenuItem(itemId, restaurantId);
 
   if (!menuItem) {
     return res.status(404).json({
-      message: "Item not found, unavailable, or does not belong to this restaurant",
+      message:
+        "Item not found, unavailable, or does not belong to this restaurant",
     });
   }
 
-  const cartItem = await Cart.findOneAndUpdate(
-    { userId, restaurantId, itemId },
-    {
-      $inc: { quantity: 1 },                      // ✅ typo fix
-      $setOnInsert: { userId, restaurantId, itemId },
-    },
-    { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
-  );
+  const cartItem = await upsertIncrementCartItem(userId, restaurantId, itemId);
 
   return res.json({
     message: "Item added to cart",
@@ -64,10 +63,7 @@ export const getCart = tryCatch(async (req: AuthenticatedRequest, res) => {
     return res.status(401).json({ message: "Please login" });
   }
 
-  const cart = await Cart.find({ userId: req.user._id })
-    .populate("itemId")        // MenuItem details
-    .populate("restaurantId"); // Restaurant details
-
+  const cart = await findPopulatedCartByUser(req.user._id);
   res.json({ cart });
 });
 
@@ -76,29 +72,19 @@ export const removeFromCart = tryCatch(async (req: AuthenticatedRequest, res) =>
     return res.status(401).json({ message: "Please login" });
   }
 
-  const itemId  = req.params.itemId as string;
+  const itemId = req.params.itemId as string;
   if (!itemId) {
     return res.status(400).json({ message: "Item id is required" });
   }
 
-  if (!mongoose.Types.ObjectId.isValid(itemId)) {
+  if (!isValidUUID(itemId)) {
     return res.status(400).json({ message: "Invalid item id" });
   }
 
-  const cartItem = await Cart.findOne({
-    userId: req.user._id,
-    itemId,
-  });
+  const result = await decrementOrDeleteCartItem(req.user._id, itemId);
 
-  if (!cartItem) {
+  if (result === "not_found") {
     return res.status(404).json({ message: "Item not found in cart" });
-  }
-
-  if (cartItem.quantity > 1) {
-    cartItem.quantity -= 1;
-    await cartItem.save();
-  } else {
-    await cartItem.deleteOne();
   }
 
   res.json({ message: "Item removed from cart" });
@@ -109,7 +95,6 @@ export const clearCart = tryCatch(async (req: AuthenticatedRequest, res) => {
     return res.status(401).json({ message: "Please login" });
   }
 
-  await Cart.deleteMany({ userId: req.user._id });
-
+  await clearCartByUser(req.user._id);
   res.json({ message: "Cart cleared successfully" });
 });

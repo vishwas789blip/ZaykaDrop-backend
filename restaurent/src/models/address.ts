@@ -1,67 +1,87 @@
-import mongoose, { Schema, Document } from "mongoose";
+import { getPool, isValidUUID } from "../config/db.js";
 
-export interface IAddress extends Document {
-  userId: mongoose.Types.ObjectId | string;
+export interface IAddress {
+  _id: string;
+  userId: string;
   phone: number;
   formattedAddress: string;
   location: {
     type: "Point";
-    coordinates: [number, number]; 
+    coordinates: [number, number]; // [longitude, latitude]
   };
   pincode: string;
   createdAt: Date;
   updatedAt: Date;
 }
 
-const addressSchema = new Schema<IAddress>(
-  {
-    userId: {
-      type: Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
-    phone: {
-      type: Number,
-      required: true,
-      validate: {
-        validator: function (v: number) {
-          return /^\d{10}$/.test(v.toString());
-        },
-        message: "Mobile number must be a valid 10-digit sequence",
-      },
-    },
-    formattedAddress: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    location: {
-      type: {
-        type: String,
-        enum: ["Point"],
-        default: "Point",
-        required: true,
-      },
-      coordinates: {
-        type: [Number], 
-        required: true,
-      },
-      
-    },
-    pincode: { 
-        type: String, 
-        required: true ,
-    },
-
+export const mapAddressRow = (row: any): IAddress => ({
+  _id: row.id,
+  userId: row.user_id,
+  phone: Number(row.phone),
+  formattedAddress: row.formatted_address,
+  location: {
+    type: "Point",
+    coordinates: [Number(row.longitude), Number(row.latitude)],
   },
-  {
-    timestamps: true,
-  }
-);
+  pincode: row.pincode,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
 
-// GeoJSON indexing for geospatial queries ($near / $geoNear operations)
-addressSchema.index({ location: "2dsphere" });
+export const createAddress = async (data: {
+  userId: string;
+  phone: number;
+  formattedAddress: string;
+  latitude: number;
+  longitude: number;
+  pincode: string;
+}): Promise<IAddress> => {
+  const { rows } = await getPool().query(
+    `INSERT INTO addresses (user_id, phone, formatted_address, latitude, longitude, pincode)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING *`,
+    [
+      data.userId,
+      data.phone,
+      data.formattedAddress.trim(),
+      data.latitude,
+      data.longitude,
+      data.pincode,
+    ]
+  );
+  return mapAddressRow(rows[0]);
+};
 
-const Address = mongoose.model<IAddress>("Address", addressSchema);
+export const findAddressByIdAndUser = async (
+  id: string,
+  userId: string
+): Promise<IAddress | null> => {
+  if (!isValidUUID(id)) return null;
+  const { rows } = await getPool().query(
+    `SELECT * FROM addresses WHERE id = $1 AND user_id = $2 LIMIT 1`,
+    [id, userId]
+  );
+  return rows[0] ? mapAddressRow(rows[0]) : null;
+};
 
-export default Address;
+export const deleteAddressByIdAndUser = async (
+  id: string,
+  userId: string
+): Promise<boolean> => {
+  if (!isValidUUID(id)) return false;
+  const { rowCount } = await getPool().query(
+    `DELETE FROM addresses WHERE id = $1 AND user_id = $2`,
+    [id, userId]
+  );
+  return (rowCount ?? 0) > 0;
+};
+
+export const findAddressesByUser = async (
+  userId: string
+): Promise<IAddress[]> => {
+  const { rows } = await getPool().query(
+    `SELECT * FROM addresses WHERE user_id = $1 ORDER BY created_at DESC`,
+    [userId]
+  );
+  return rows.map(mapAddressRow);
+};

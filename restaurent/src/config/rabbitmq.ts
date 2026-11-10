@@ -9,11 +9,7 @@ export const connectRabbitMQ = async () => {
 
   channel = await connection.createChannel();
 
-  const queue = process.env.ORDER_READY_QUEUE;
-
-  if (!queue) {
-    throw new Error("ORDER_READY_QUEUE is not defined");
-  }
+  const queue = process.env.ORDER_READY_QUEUE || "order_ready_queue";
 
   await channel.assertQueue(queue, {
     durable: true,

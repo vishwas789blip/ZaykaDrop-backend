@@ -1,41 +1,6 @@
 require("dotenv").config();
-const mongoose = require("mongoose");
 
-const menuItemSchema = new mongoose.Schema(
-  {
-    restaurantId: { type: mongoose.Schema.Types.ObjectId, ref: "Restaurant", required: true },
-    name: { type: String, required: true },
-    description: { type: String },
-    image: { type: String, default: "" },
-    price: { type: Number, required: true },
-    isAvailable: { type: Boolean, default: true },
-  },
-  { timestamps: true }
-);
-
-const restaurantSchema = new mongoose.Schema(
-  {
-    name: { type: String, required: true },
-    description: { type: String },
-    image: { type: String, required: true },
-    ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    phone: { type: String, required: true },
-    isVerified: { type: Boolean, default: false },
-    autoLocation: {
-      type: { type: String, enum: ["Point"], required: true },
-      coordinates: { type: [Number], required: true },
-      formattedAddress: { type: String, required: true },
-    },
-    isOpen: { type: Boolean, default: true },
-  },
-  { timestamps: true }
-);
-restaurantSchema.index({ autoLocation: "2dsphere" });
-
-const Restaurant = mongoose.model("Restaurant", restaurantSchema);
-const MenuItem = mongoose.model("MenuItem", menuItemSchema);
-
-const OWNER_ID = new mongoose.Types.ObjectId("6a829506df27845a48b94863");
+const OWNER_ID = "6aca92126c892053b0600db8";
 
 const restaurants = [
   {
@@ -164,35 +129,54 @@ const restaurants = [
 ];
 
 async function seed() {
-  const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URI || "mongodb://localhost:27017/ZaykaDrop";
+  const db = require("./dist/config/db.js");
+  await db.default();
+  const pool = db.getPool();
+  console.log("Connected to PostgreSQL");
 
-  await mongoose.connect(MONGO_URI, { dbName: "ZaykaDrop" });
-  console.log("Connected to MongoDB (ZaykaDrop database)");
-  
-  await Restaurant.deleteMany({});
-  await MenuItem.deleteMany({});
+  await pool.query("DELETE FROM menu_items");
+  await pool.query("DELETE FROM restaurants");
   console.log("Cleared existing restaurants and menu items");
 
   for (const r of restaurants) {
-    const { menu, ...restaurantData } = r;
+    const { menu, autoLocation, ...restaurantData } = r;
+    const [longitude, latitude] = autoLocation.coordinates;
 
-    const restaurant = await Restaurant.create({
-      ...restaurantData,
-      ownerId: OWNER_ID,
-    });
+    const { rows } = await pool.query(
+      `INSERT INTO restaurants (
+        name, description, image, owner_id, phone, is_verified,
+        latitude, longitude, formatted_address, is_open
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING id, name`,
+      [
+        restaurantData.name,
+        restaurantData.description,
+        restaurantData.image,
+        OWNER_ID,
+        restaurantData.phone,
+        restaurantData.isVerified,
+        latitude,
+        longitude,
+        autoLocation.formattedAddress,
+        restaurantData.isOpen,
+      ]
+    );
 
-    const menuItems = menu.map((item) => ({
-      ...item,
-      restaurantId: restaurant._id,
-      isAvailable: true,
-    }));
+    const restaurant = rows[0];
 
-    await MenuItem.insertMany(menuItems);
+    for (const item of menu) {
+      await pool.query(
+        `INSERT INTO menu_items (restaurant_id, name, description, image, price, is_available)
+         VALUES ($1, $2, $3, $4, $5, TRUE)`,
+        [restaurant.id, item.name, item.description, item.image, item.price]
+      );
+    }
+
     console.log(`Seeded: ${restaurant.name} (${menu.length} items)`);
   }
 
   console.log("\nSeed complete! 6 Ghaziabad restaurants inserted.");
-  await mongoose.disconnect();
+  await pool.end();
 }
 
 seed().catch((err) => {

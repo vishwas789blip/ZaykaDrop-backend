@@ -1,8 +1,15 @@
 import axios from "axios";
-import jwt from "jsonwebtoken";                        
+import jwt from "jsonwebtoken";
 import { AuthenticatedRequest, IUser } from "../middleware/isAuth.js";
 import tryCatch from "../middleware/tryCatch.js";
-import Restaurant from "../models/Restaurant.js";         
+import {
+  createRestaurant,
+  findNearbyRestaurants,
+  findRestaurantById,
+  findRestaurantByOwnerId,
+  updateRestaurantByOwner,
+  updateRestaurantStatusByOwner,
+} from "../models/Restaurant.js";
 import getBuffer from "../config/datauri.js";
 
 export const addRestaurant = tryCatch(
@@ -13,14 +20,14 @@ export const addRestaurant = tryCatch(
       return res.status(401).json({ message: "Unauthorized" });
     }
 
-    const existingRestaurant = await Restaurant.findOne({ ownerId: user._id });
+    const existingRestaurant = await findRestaurantByOwnerId(user._id);
     if (existingRestaurant) {
       return res.status(400).json({
         message: "Restaurant already exists for this user",
       });
     }
 
-    const { name, description, latitude, longitude, formattedAddress, phone, image } =
+    const { name, description, latitude, longitude, formattedAddress, phone } =
       req.body;
 
     if (!name || !description || !phone || !formattedAddress) {
@@ -53,6 +60,11 @@ export const addRestaurant = tryCatch(
           buffer: file.buffer.toString("base64"),
           name: file.originalname,
           type: file.mimetype,
+        },
+        {
+          headers: {
+            "x-internal-key": process.env.INTERNAL_SERVICE_KEY || "",
+          },
         }
       );
       uploadResult = data;
@@ -65,17 +77,15 @@ export const addRestaurant = tryCatch(
       return res.status(500).json({ message: "Image upload failed" });
     }
 
-    const newRestaurant = await Restaurant.create({
+    const newRestaurant = await createRestaurant({
       name,
       description,
       phone,
       image: uploadResult.url,
       ownerId: user._id,
-      autoLocation: {
-        type: "Point",
-        coordinates: [Number(longitude), Number(latitude)],
-        formattedAddress,
-      },
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      formattedAddress,
       isVerified: false,
     });
 
@@ -92,7 +102,7 @@ export const fetchMyRestaurant = tryCatch(
       return res.status(401).json({ message: "Please login" });
     }
 
-    const foundRestaurant = await Restaurant.findOne({ ownerId: req.user._id });
+    const foundRestaurant = await findRestaurantByOwnerId(req.user._id);
 
     if (!foundRestaurant) {
       return res.status(404).json({ message: "Restaurant not found" });
@@ -107,13 +117,13 @@ export const fetchMyRestaurant = tryCatch(
       const token = jwt.sign(
         { user: updatedUser },
         process.env.JWT_SECRET as string,
-        { expiresIn: "7d" }                   
+        { expiresIn: "7d" }
       );
 
       return res.status(200).json({
         message: "Restaurant fetched successfully with session upgrade",
         restaurant: foundRestaurant,
-        token,                                 
+        token,
       });
     }
 
@@ -140,10 +150,9 @@ export const updateStatusRestaurant = tryCatch(
       });
     }
 
-    const restaurant = await Restaurant.findOneAndUpdate(
-      { ownerId: req.user._id },
-      { isOpen: status },
-      { new: true }
+    const restaurant = await updateRestaurantStatusByOwner(
+      req.user._id,
+      status
     );
 
     if (!restaurant) {
@@ -165,22 +174,18 @@ export const updateRestaurant = tryCatch(
       return res.status(403).json({ message: "Please login" });
     }
 
-    const { name, description, phone } = req.body;  
+    const { name, description, phone } = req.body;
 
     if (phone && !/^\d{10}$/.test(phone)) {
       return res.status(400).json({ message: "Invalid phone number" });
     }
 
-    const updateData: Record<string, string> = {};
-    if (name) updateData.name = name;
-    if (description) updateData.description = description;
-    if (phone) updateData.phone = phone;  
+    const updates: { name?: string; description?: string; phone?: string } = {};
+    if (name) updates.name = name;
+    if (description) updates.description = description;
+    if (phone) updates.phone = phone;
 
-    const restaurant = await Restaurant.findOneAndUpdate(
-      { ownerId: req.user._id },
-      updateData,
-      { new: true }
-    );
+    const restaurant = await updateRestaurantByOwner(req.user._id, updates);
 
     if (!restaurant) {
       return res.status(404).json({ message: "Restaurant not found" });
@@ -194,7 +199,7 @@ export const updateRestaurant = tryCatch(
 );
 
 export const getNearByRestaurant = tryCatch(async (req, res) => {
-  const { latitude, longitude, radius = 5000, search = "" } = req.query; 
+  const { latitude, longitude, radius = 5000, search = "" } = req.query;
 
   if (!latitude || !longitude) {
     return res.status(400).json({
@@ -202,45 +207,24 @@ export const getNearByRestaurant = tryCatch(async (req, res) => {
     });
   }
 
-  const query: any = { isVerified: true };
-
-  if (search && typeof search === "string") {
-    query.name = { $regex: search, $options: "i" };
-  }
-
-  const restaurants = await Restaurant.aggregate([
-    {
-      $geoNear: {
-        near: {
-          type: "Point",
-          coordinates: [Number(longitude), Number(latitude)], 
-        },
-        key: "autoLocation", 
-        distanceField: "distance",
-        maxDistance: Number(radius),
-        spherical: true,
-        query,
-      },
-    },
-    { $sort: { isOpen: -1, distance: 1 } },
-    {
-      $addFields: {
-        distanceKm: { $round: [{ $divide: ["$distance", 1000] }, 2] },
-      },
-    },
-  ]);
+  const restaurants = await findNearbyRestaurants(
+    Number(latitude),
+    Number(longitude),
+    Number(radius),
+    typeof search === "string" ? search.trim() : ""
+  );
 
   res.json({ success: true, count: restaurants.length, restaurants });
 });
 
 export const fetchSingleRestaurant = tryCatch(async (req, res) => {
-  const { id } = req.params;
+  const id = req.params.id as string;
 
   if (!id) {
     return res.status(400).json({ message: "Restaurant id is required" });
   }
 
-  const restaurant = await Restaurant.findById(id);
+  const restaurant = await findRestaurantById(id);
 
   if (!restaurant) {
     return res.status(404).json({ message: "Restaurant not found" });
